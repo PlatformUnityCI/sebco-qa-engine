@@ -68,19 +68,36 @@ src/foo.py                   50     10    80%
 # ---------------------------------------------------------------------------
 
 class TestCoverageAnalyzerRun:
-    def test_run_calls_coverage_report(self, tmp_path):
+    def test_run_executes_coverage_run_then_report_by_default(self, tmp_path):
+        """Default config (run_tests=True) must call 'coverage run' then 'coverage report'."""
         analyzer = _make_analyzer(tmp_path)
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _make_proc("")
             analyzer.run()
 
+        assert mock_run.call_count == 2
+        cmds = [call[0][0] for call in mock_run.call_args_list]
+        assert cmds[0][:2] == ["coverage", "run"]
+        assert cmds[1][:2] == ["coverage", "report"]
+
+    def test_run_only_report_when_run_tests_false(self, tmp_path):
+        """run_tests=False must skip 'coverage run' and only call 'coverage report'."""
+        cfg = CoverageConfig(run_tests=False)
+        analyzer = _make_analyzer(tmp_path, config=cfg)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _make_proc("")
+            analyzer.run()
+
+        assert mock_run.call_count == 1
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "coverage"
         assert cmd[1] == "report"
 
     def test_run_includes_format_text(self, tmp_path):
-        analyzer = _make_analyzer(tmp_path)
+        cfg = CoverageConfig(run_tests=False)
+        analyzer = _make_analyzer(tmp_path, config=cfg)
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _make_proc("")
@@ -89,8 +106,8 @@ class TestCoverageAnalyzerRun:
         cmd = mock_run.call_args[0][0]
         assert "--format=text" in cmd
 
-    def test_run_forwards_extra_args(self, tmp_path):
-        cfg = CoverageConfig(extra_args=["--include=src/*"])
+    def test_run_forwards_extra_args_to_report(self, tmp_path):
+        cfg = CoverageConfig(run_tests=False, extra_args=["--include=src/*"])
         analyzer = _make_analyzer(tmp_path, config=cfg)
 
         with patch("subprocess.run") as mock_run:
@@ -100,7 +117,31 @@ class TestCoverageAnalyzerRun:
         cmd = mock_run.call_args[0][0]
         assert "--include=src/*" in cmd
 
-    def test_run_handles_timeout(self, tmp_path):
+    def test_run_forwards_test_command_to_coverage_run(self, tmp_path):
+        cfg = CoverageConfig(test_command=["pytest", "tests/unit"])
+        analyzer = _make_analyzer(tmp_path, config=cfg)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _make_proc("")
+            analyzer.run()
+
+        run_cmd = mock_run.call_args_list[0][0][0]
+        assert "pytest" in run_cmd
+        assert "tests/unit" in run_cmd
+
+    def test_run_forwards_run_extra_args(self, tmp_path):
+        cfg = CoverageConfig(run_extra_args=["--source=src"])
+        analyzer = _make_analyzer(tmp_path, config=cfg)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _make_proc("")
+            analyzer.run()
+
+        run_cmd = mock_run.call_args_list[0][0][0]
+        assert "--source=src" in run_cmd
+
+    def test_run_aborts_after_collection_timeout(self, tmp_path):
+        """If 'coverage run' times out the report step must be skipped."""
         analyzer = _make_analyzer(tmp_path, config=CoverageConfig(timeout=5))
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="coverage", timeout=5)):
@@ -117,7 +158,8 @@ class TestCoverageAnalyzerRun:
         assert "[ERROR]" in raw
 
     def test_run_returns_combined_stdout_stderr(self, tmp_path):
-        analyzer = _make_analyzer(tmp_path)
+        cfg = CoverageConfig(run_tests=False)
+        analyzer = _make_analyzer(tmp_path, config=cfg)
 
         proc = MagicMock()
         proc.stdout = "stdout content"
