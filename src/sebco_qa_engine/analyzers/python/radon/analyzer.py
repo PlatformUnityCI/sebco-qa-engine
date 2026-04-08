@@ -68,9 +68,9 @@ class RadonAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def run(self) -> str:
-        """Execute radon mi and return its JSON output as a string.
+        """Execute ``radon mi -j`` and return its JSON output as a string.
 
-        Radon mi exits 0 always.
+        ``radon mi`` exits 0 always.
 
         Returns
         -------
@@ -82,6 +82,7 @@ class RadonAnalyzer(BaseAnalyzer):
             "radon",
             "mi",
             "-j",
+            *(["--min", self.config.min_rank] if self.config.min_rank else []),
             *self.config.paths,
             *self.config.extra_args,
         ]
@@ -104,20 +105,32 @@ class RadonAnalyzer(BaseAnalyzer):
         return (proc.stdout or "") + (proc.stderr or "")
 
     def normalize(self, raw_output: str) -> AnalyzerResult:
-        """Parse radon mi JSON output into a structured AnalyzerResult.
+        """Parse ``radon mi -j`` JSON output into a structured AnalyzerResult.
+
+        Supports both radon output formats:
+
+        **radon ≥ 5.x** (current) — flat dict per file::
+
+            {"src/foo.py": {"mi": 87.5, "rank": "A"}, ...}
+
+        **radon < 5.x** (legacy) — list of module entries per file::
+
+            {"src/foo.py": [{"type": "Module", "mi": 87.5, "rank": "A", ...}], ...}
 
         Parameters
         ----------
         raw_output:
             The string returned by ``run()``.
         """
-        # Handle error sentinels from run()
-        if raw_output.startswith("[ERROR]") or raw_output.startswith("[TIMEOUT]"):
+        # Handle error sentinels from run().
+        # Use `in` (not startswith) — stderr noise can precede the sentinel.
+        if "[ERROR]" in raw_output or "[TIMEOUT]" in raw_output:
             return AnalyzerResult(
                 analyzer=self.name,
                 language=self.language,
                 execution_status=ExecutionStatus.ERROR,
                 raw_output=raw_output,
+                error_message=raw_output,
             )
 
         try:
@@ -131,16 +144,19 @@ class RadonAnalyzer(BaseAnalyzer):
                 raw_output=raw_output,
             )
 
-        # Collect all module entries across all files
-        # Format: {"filename.py": [{"type": "Module", "rank": "A", "mi": 87.5, ...}, ...], ...}
+        # Parse per-file entries — handle both current (dict) and legacy (list) formats.
         all_mi_values: list[float] = []
         grade_counts: dict[str, int] = {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0, "F": 0}
         details: list[dict] = []
 
-        for filename, entries in data.items():
-            for entry in entries:
-                mi_value = entry.get("mi")
-                rank = entry.get("rank", "")
+        for filename, entry in data.items():
+            # Current format (radon ≥ 5.x): entry is a plain dict {mi, rank}
+            # Legacy format (radon < 5.x): entry is a list of module dicts
+            entries: list[dict] = entry if isinstance(entry, list) else [entry]
+
+            for mod in entries:
+                mi_value = mod.get("mi")
+                rank = mod.get("rank", "")
                 if mi_value is not None:
                     all_mi_values.append(float(mi_value))
                 if rank in grade_counts:
@@ -152,11 +168,21 @@ class RadonAnalyzer(BaseAnalyzer):
                 })
 
         total = len(all_mi_values)
-        score = round(sum(all_mi_values) / total, 2) if total > 0 else None
+
+        # radon MI values are already in the 0-100 range — the mean is the score.
+        raw_score = round(sum(all_mi_values) / total, 2) if total > 0 else None
+
+        # Clamp to [0, 100] defensively (radon can theoretically exceed 100).
+        score = round(max(0.0, min(100.0, raw_score)), 2) if raw_score is not None else None
+
+        # low_count = files ranked C, D, E, or F (signal for issue_count).
+        low_count = sum(grade_counts.get(g, 0) for g in ("C", "D", "E", "F"))
 
         metrics = RunMetrics(
             score=score,
             total=total,
+            ok_count=grade_counts.get("A", 0) + grade_counts.get("B", 0),
+            issue_count=low_count,
             extra={"grades": grade_counts},
         )
 
@@ -226,9 +252,12 @@ class RadonAnalyzer(BaseAnalyzer):
 
     @staticmethod
     def _to_summary_md(result: AnalyzerResult) -> str:
-        grades = result.metrics.extra.get("grades", {}) if result.metrics.extra else {}
-        score_str = str(result.metrics.score) if result.metrics.score is not None else "N/A"
-        total_str = str(result.metrics.total) if result.metrics.total is not None else "N/A"
+        m = result.metrics
+        grades = m.extra.get("grades", {}) if m.extra else {}
+        score_str = f"{m.score}" if m.score is not None else "N/A"
+        total_str = str(m.total) if m.total is not None else "N/A"
+        ok_str = str(m.ok_count) if m.ok_count is not None else "N/A"
+        issue_str = str(m.issue_count) if m.issue_count is not None else "N/A"
 
         grade_rows = "\n".join(
             f"| {grade} | **{count}** |"
@@ -242,6 +271,8 @@ class RadonAnalyzer(BaseAnalyzer):
 |---|---:|
 | Mean MI Score | **{score_str}** |
 | Total modules | **{total_str}** |
+| A/B (healthy) | **{ok_str}** |
+| C-F (at risk) | **{issue_str}** |
 
 ### Grade Distribution
 

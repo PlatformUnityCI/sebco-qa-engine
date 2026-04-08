@@ -117,13 +117,15 @@ class BanditAnalyzer(BaseAnalyzer):
         raw_output:
             The string returned by ``run()``.
         """
-        # Handle error sentinels from run()
-        if raw_output.startswith("[ERROR]") or raw_output.startswith("[TIMEOUT]"):
+        # Handle error sentinels from run().
+        # Use `in` (not startswith) — stderr noise can precede the sentinel.
+        if "[ERROR]" in raw_output or "[TIMEOUT]" in raw_output:
             return AnalyzerResult(
                 analyzer=self.name,
                 language=self.language,
                 execution_status=ExecutionStatus.ERROR,
                 raw_output=raw_output,
+                error_message=raw_output,
             )
 
         try:
@@ -144,10 +146,24 @@ class BanditAnalyzer(BaseAnalyzer):
         low = int(totals.get("SEVERITY.LOW", 0))
         issue_count = high + medium + low
 
+        # Derive a 0-100 score from issue_count for reporting/dashboard.
+        # The quality gate itself is driven by SeverityPolicy (not this score).
+        budget = self.config.max_issue_budget
+        score = max(0.0, round((1 - issue_count / budget) * 100, 2))
+
+        # ok_count = scanned lines of code (loc), if reported by bandit.
+        loc = int(totals.get("loc", 0))
+
         metrics = RunMetrics(
+            score=score,
             total=issue_count,
+            ok_count=loc or None,
             issue_count=issue_count,
-            extra={"severity": {"high": high, "medium": medium, "low": low}},
+            extra={
+                "severity": {"high": high, "medium": medium, "low": low},
+                "score_percent": score,
+                "max_issue_budget": budget,
+            },
         )
 
         # Parse individual findings from results array
@@ -203,15 +219,19 @@ class BanditAnalyzer(BaseAnalyzer):
 
     @staticmethod
     def _to_normalized_json(result: AnalyzerResult) -> str:
-        severity = result.metrics.extra.get("severity", {}) if result.metrics.extra else {}
+        extra = result.metrics.extra or {}
+        severity = extra.get("severity", {})
         payload = {
             "analyzer": result.analyzer,
             "language": result.language,
             "execution_status": result.execution_status.value,
             "metrics": {
+                "score": result.metrics.score,
                 "total": result.metrics.total,
                 "issue_count": result.metrics.issue_count,
+                "ok_count": result.metrics.ok_count,
                 "severity": severity,
+                "max_issue_budget": extra.get("max_issue_budget"),
             },
             "details": [asdict(d) for d in result.details],
         }
@@ -219,32 +239,46 @@ class BanditAnalyzer(BaseAnalyzer):
 
     @staticmethod
     def _to_summary_json(result: AnalyzerResult) -> str:
-        severity = result.metrics.extra.get("severity", {}) if result.metrics.extra else {}
+        extra = result.metrics.extra or {}
+        severity = extra.get("severity", {})
         payload = {
             "analyzer": result.analyzer,
             "execution_status": result.execution_status.value,
+            "score": result.metrics.score,
+            "score_percent": extra.get("score_percent"),
             "issue_count": result.metrics.issue_count,
+            "max_issue_budget": extra.get("max_issue_budget"),
             "severity": severity,
         }
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     @staticmethod
     def _to_summary_md(result: AnalyzerResult) -> str:
-        severity = result.metrics.extra.get("severity", {}) if result.metrics.extra else {}
+        extra = result.metrics.extra or {}
+        severity = extra.get("severity", {})
         high = severity.get("high", 0)
         medium = severity.get("medium", 0)
         low = severity.get("low", 0)
         total = result.metrics.issue_count or 0
+        score = result.metrics.score
+        score_str = f"{score}%" if score is not None else "N/A"
+        budget = extra.get("max_issue_budget", "N/A")
 
         return f"""\
 ## Security Analysis Summary (bandit)
+
+| Metric | Value |
+|---|---:|
+| Score | **{score_str}** |
+| Total Findings | **{total}** / {budget} budget |
+
+### Severity Breakdown
 
 | Severity | Count |
 |---|---:|
 | High | **{high}** |
 | Medium | **{medium}** |
 | Low | **{low}** |
-| **Total** | **{total}** |
 
 Execution status: `{result.execution_status.value}`
 

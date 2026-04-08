@@ -73,6 +73,9 @@ BANDIT_JSON_WITH_FINDINGS = json.dumps({
     ],
 })
 
+# issue_count=2, budget=50 → score = max(0, (1 - 2/50)*100) = 96.0
+_EXPECTED_SCORE_WITH_FINDINGS = round(max(0.0, (1 - 2 / 50) * 100), 2)
+
 BANDIT_JSON_NO_FINDINGS = json.dumps({
     "errors": [],
     "generated_at": "2024-01-01T00:00:00Z",
@@ -405,3 +408,112 @@ class TestBanditAnalyzerFullPipeline:
 
         assert result.execution_status == ExecutionStatus.ERROR
         assert "boom" in result.error_message
+
+
+# ---------------------------------------------------------------------------
+# Tests: score derivation and ok_count
+# ---------------------------------------------------------------------------
+
+class TestBanditAnalyzerScore:
+    def test_score_derived_from_issue_count_and_budget(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        assert result.metrics.score == pytest.approx(_EXPECTED_SCORE_WITH_FINDINGS)
+
+    def test_score_is_100_when_no_findings(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_NO_FINDINGS)
+        assert result.metrics.score == pytest.approx(100.0)
+
+    def test_score_clamped_to_zero_when_over_budget(self, tmp_path):
+        # Build JSON with 100 findings against a budget of 10
+        from sebco_qa_engine.analyzers.python.bandit.config import BanditConfig
+        cfg = BanditConfig(max_issue_budget=10)
+        analyzer = BanditAnalyzer(output_dir=tmp_path / "qa-report" / "bandit", config=cfg)
+
+        data = json.dumps({
+            "errors": [],
+            "metrics": {"_totals": {"SEVERITY.HIGH": 100, "SEVERITY.MEDIUM": 0, "SEVERITY.LOW": 0, "loc": 500}},
+            "results": [],
+        })
+        result = analyzer.normalize(data)
+        assert result.metrics.score == pytest.approx(0.0)
+
+    def test_ok_count_is_loc_when_present(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        # loc = 100 in the fixture
+        assert result.metrics.ok_count == 100
+
+    def test_ok_count_is_none_when_loc_is_zero(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        # BANDIT_JSON_NO_FINDINGS has loc=50
+        result = analyzer.normalize(BANDIT_JSON_NO_FINDINGS)
+        assert result.metrics.ok_count == 50
+
+    def test_score_percent_in_extra(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        assert result.metrics.extra["score_percent"] == pytest.approx(_EXPECTED_SCORE_WITH_FINDINGS)
+
+    def test_max_issue_budget_in_extra(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        assert result.metrics.extra["max_issue_budget"] == 50
+
+
+# ---------------------------------------------------------------------------
+# Tests: error_message populated on ERROR status
+# ---------------------------------------------------------------------------
+
+class TestBanditAnalyzerErrorMessage:
+    def test_error_sentinel_populates_error_message(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        raw = "[ERROR] Command not found: bandit"
+        result = analyzer.normalize(raw)
+        assert result.error_message == raw
+
+    def test_timeout_sentinel_populates_error_message(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        raw = "[TIMEOUT] Command timed out after 120s: bandit -f json ."
+        result = analyzer.normalize(raw)
+        assert result.error_message == raw
+
+    def test_error_message_empty_on_success(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        assert result.error_message == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: summary JSON has score fields
+# ---------------------------------------------------------------------------
+
+class TestBanditAnalyzerSummaryJson:
+    def _get_summary_data(self, tmp_path) -> dict:
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        analyzer.write_artifacts(result)
+        return json.loads(result.artifacts["summary_json"].read_text())
+
+    def test_summary_json_has_score(self, tmp_path):
+        data = self._get_summary_data(tmp_path)
+        assert "score" in data
+        assert data["score"] == pytest.approx(_EXPECTED_SCORE_WITH_FINDINGS)
+
+    def test_summary_json_has_score_percent(self, tmp_path):
+        data = self._get_summary_data(tmp_path)
+        assert "score_percent" in data
+        assert data["score_percent"] == pytest.approx(_EXPECTED_SCORE_WITH_FINDINGS)
+
+    def test_summary_json_has_max_issue_budget(self, tmp_path):
+        data = self._get_summary_data(tmp_path)
+        assert "max_issue_budget" in data
+        assert data["max_issue_budget"] == 50
+
+    def test_normalized_json_has_score(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(BANDIT_JSON_WITH_FINDINGS)
+        analyzer.write_artifacts(result)
+        data = json.loads(result.artifacts["normalized"].read_text())
+        assert data["metrics"]["score"] == pytest.approx(_EXPECTED_SCORE_WITH_FINDINGS)

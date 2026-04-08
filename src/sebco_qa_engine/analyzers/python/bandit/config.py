@@ -27,6 +27,10 @@ class BanditConfig:
     timeout:
         Maximum seconds to wait for the ``bandit`` subprocess.
         ``None`` means no timeout.
+    max_issue_budget:
+        Denominator used to derive ``score`` for reporting/dashboard.
+        ``score = max(0, round((1 - issue_count / max_issue_budget) * 100, 2))``.
+        Does NOT affect the quality gate — ``SeverityPolicy`` drives that.
 
     Examples
     --------
@@ -43,3 +47,7 @@ class BanditConfig:
     recursive: bool = True
     extra_args: list[str] = field(default_factory=list)
     timeout: int | None = 120
+    # Budget used to derive score for reporting/dashboard (mirrors flake8 pattern).
+    # score = max(0, round((1 - issue_count / max_issue_budget) * 100, 2))
+    # Does NOT affect the quality gate — SeverityPolicy drives that.
+    max_issue_budget: int = 50

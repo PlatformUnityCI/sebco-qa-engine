@@ -33,12 +33,29 @@ def _make_analyzer(tmp_path: Path, config: RadonConfig | None = None) -> RadonAn
     return RadonAnalyzer(output_dir=tmp_path / "qa-report" / "radon", config=config)
 
 
-RADON_JSON = json.dumps({
+# Legacy format (radon < 5.x): each file maps to a list of module dicts.
+RADON_JSON_LEGACY = json.dumps({
     "src/foo.py": [{"type": "Module", "rank": "A", "mi": 87.5, "name": "src/foo.py"}],
     "src/bar.py": [{"type": "Module", "rank": "B", "mi": 65.3, "name": "src/bar.py"}],
 })
 
+# Current format (radon ≥ 5.x): each file maps to a plain dict {mi, rank}.
+RADON_JSON_CURRENT = json.dumps({
+    "src/foo.py": {"mi": 87.5, "rank": "A"},
+    "src/bar.py": {"mi": 65.3, "rank": "B"},
+})
+
+# Default fixture used in most tests — current format.
+RADON_JSON = RADON_JSON_CURRENT
+
 RADON_JSON_EMPTY = json.dumps({})
+
+# foo=A, bar=B, baz=C → ok_count=2, issue_count=1
+RADON_JSON_MIXED_GRADES = json.dumps({
+    "src/foo.py": {"mi": 90.0, "rank": "A"},
+    "src/bar.py": {"mi": 75.0, "rank": "B"},
+    "src/baz.py": {"mi": 40.0, "rank": "C"},
+})
 
 
 # ---------------------------------------------------------------------------
@@ -294,3 +311,144 @@ class TestRadonAnalyzerFullPipeline:
 
         assert result.execution_status == ExecutionStatus.ERROR
         assert "boom" in result.error_message
+
+
+# ---------------------------------------------------------------------------
+# Tests: radon ≥ 5.x (current) format compatibility
+# ---------------------------------------------------------------------------
+
+class TestRadonAnalyzerCurrentFormat:
+    """Ensure the current radon ≥ 5.x dict-per-file format is parsed correctly."""
+
+    def test_current_format_execution_status_success(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_CURRENT)
+        assert result.execution_status == ExecutionStatus.SUCCESS
+
+    def test_current_format_score_is_mean_mi(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_CURRENT)
+        expected = round((87.5 + 65.3) / 2, 2)
+        assert result.metrics.score == pytest.approx(expected, abs=0.01)
+
+    def test_current_format_total_is_file_count(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_CURRENT)
+        assert result.metrics.total == 2
+
+    def test_current_format_details_parsed(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_CURRENT)
+        files = [d["file"] for d in result.details]
+        assert "src/foo.py" in files and "src/bar.py" in files
+
+    def test_legacy_format_still_works(self, tmp_path):
+        """radon < 5.x list-per-file format must still be parsed correctly."""
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_LEGACY)
+        assert result.execution_status == ExecutionStatus.SUCCESS
+        assert result.metrics.total == 2
+        expected = round((87.5 + 65.3) / 2, 2)
+        assert result.metrics.score == pytest.approx(expected, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Tests: ok_count and issue_count from grade distribution
+# ---------------------------------------------------------------------------
+
+class TestRadonAnalyzerGradeMetrics:
+    def test_ok_count_is_a_plus_b_grades(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_MIXED_GRADES)
+        # foo=A, bar=B → ok_count=2
+        assert result.metrics.ok_count == 2
+
+    def test_issue_count_is_c_through_f_grades(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON_MIXED_GRADES)
+        # baz=C → issue_count=1
+        assert result.metrics.issue_count == 1
+
+    def test_ok_count_zero_when_all_bad(self, tmp_path):
+        all_bad = json.dumps({
+            "src/a.py": {"mi": 20.0, "rank": "F"},
+            "src/b.py": {"mi": 30.0, "rank": "D"},
+        })
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(all_bad)
+        assert result.metrics.ok_count == 0
+        assert result.metrics.issue_count == 2
+
+    def test_issue_count_zero_when_all_good(self, tmp_path):
+        all_good = json.dumps({
+            "src/a.py": {"mi": 90.0, "rank": "A"},
+            "src/b.py": {"mi": 82.0, "rank": "A"},
+        })
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(all_good)
+        assert result.metrics.ok_count == 2
+        assert result.metrics.issue_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: score clamping and error_message on ERROR
+# ---------------------------------------------------------------------------
+
+class TestRadonAnalyzerScoreAndErrors:
+    def test_score_clamped_to_100(self, tmp_path):
+        # Radon can theoretically report MI > 100 — must clamp.
+        over_100 = json.dumps({"src/a.py": {"mi": 120.0, "rank": "A"}})
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(over_100)
+        assert result.metrics.score <= 100.0
+
+    def test_score_clamped_to_zero(self, tmp_path):
+        below_zero = json.dumps({"src/a.py": {"mi": -5.0, "rank": "F"}})
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(below_zero)
+        assert result.metrics.score >= 0.0
+
+    def test_error_sentinel_populates_error_message(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        raw = "[ERROR] Command not found: radon"
+        result = analyzer.normalize(raw)
+        assert result.error_message == raw
+
+    def test_timeout_sentinel_populates_error_message(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        raw = "[TIMEOUT] Command timed out after 120s: radon mi -j ."
+        result = analyzer.normalize(raw)
+        assert result.error_message == raw
+
+    def test_error_message_empty_on_success(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+        result = analyzer.normalize(RADON_JSON)
+        assert result.error_message == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: run() — min_rank forwarded to command
+# ---------------------------------------------------------------------------
+
+class TestRadonAnalyzerRunMinRank:
+    def test_run_forwards_min_rank(self, tmp_path):
+        cfg = RadonConfig(min_rank="B")
+        analyzer = _make_analyzer(tmp_path, config=cfg)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _make_proc(stdout=RADON_JSON)
+            analyzer.run()
+
+        cmd = mock_run.call_args[0][0]
+        assert "--min" in cmd
+        assert "B" in cmd
+
+    def test_run_no_min_rank_by_default(self, tmp_path):
+        analyzer = _make_analyzer(tmp_path)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _make_proc(stdout=RADON_JSON)
+            analyzer.run()
+
+        cmd = mock_run.call_args[0][0]
+        assert "--min" not in cmd

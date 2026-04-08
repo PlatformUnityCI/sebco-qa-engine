@@ -39,3 +39,6 @@ class RadonConfig:
     paths: list[str] = field(default_factory=lambda: ["."])
     extra_args: list[str] = field(default_factory=list)
     timeout: int | None = 120
+    # Minimum MI rank to include in the report (passed as --min to radon mi).
+    # ``None`` means include all ranks (A–F).
+    min_rank: str | None = None
