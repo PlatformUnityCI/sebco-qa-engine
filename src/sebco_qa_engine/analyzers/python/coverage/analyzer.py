@@ -90,22 +90,65 @@ class CoverageAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def run(self) -> str:
-        """Execute ``coverage report`` and return combined stdout+stderr.
+        """Execute coverage collection + report and return combined output.
 
-        Coverage exits 0 even with low coverage — non-zero exit is not raised.
+        When ``config.run_tests`` is ``True`` (the default), runs::
+
+            coverage run -m <test_command> [run_extra_args]
+
+        first to collect coverage data, then::
+
+            coverage report --format=text [extra_args]
+
+        When ``run_tests=False``, skips collection and only runs ``report``
+        (assumes a ``.coverage`` file already exists).
 
         Returns
         -------
         str
-            Combined stdout + stderr from the coverage process.
+            Combined stdout + stderr from all coverage subprocesses,
+            separated by section headers.  Sentinel strings ``[TIMEOUT]``
+            or ``[ERROR]`` are injected on hard failures so that
+            ``normalize()`` can detect them without inspecting exit codes.
         """
-        cmd = [
+        sections: list[str] = []
+
+        if self.config.run_tests:
+            run_cmd = [
+                "coverage",
+                "run",
+                "-m",
+                *self.config.test_command,
+                *self.config.run_extra_args,
+            ]
+            run_out = self._run_subprocess(run_cmd)
+            sections.append("=== coverage run ===\n" + run_out)
+
+            # Abort early if collection itself hard-failed (tool missing / timeout).
+            if run_out.startswith("[TIMEOUT]") or run_out.startswith("[ERROR]"):
+                return "\n" + "=" * 60 + "\n".join(sections)
+
+        report_cmd = [
             "coverage",
             "report",
             "--format=text",
             *self.config.extra_args,
         ]
+        report_out = self._run_subprocess(report_cmd)
+        sections.append("=== coverage report ===\n" + report_out)
 
+        return ("\n" + "=" * 60 + "\n").join(sections)
+
+    # ------------------------------------------------------------------
+    # Private helpers — subprocess
+    # ------------------------------------------------------------------
+
+    def _run_subprocess(self, cmd: list[str]) -> str:
+        """Run *cmd* and return combined stdout+stderr.
+
+        Non-zero exit codes are logged but do NOT raise — ``coverage run``
+        exits non-zero when tests fail, which is a valid outcome.
+        """
         logger.debug("[coverage] Running: %s", " ".join(cmd))
 
         try:
@@ -119,8 +162,8 @@ class CoverageAnalyzer(BaseAnalyzer):
             logger.warning("[coverage] Command timed out after %ss", self.config.timeout)
             return f"[TIMEOUT] Command timed out after {self.config.timeout}s: {' '.join(cmd)}"
         except FileNotFoundError:
-            logger.error("[coverage] Command not found: coverage")
-            return "[ERROR] Command not found: coverage"
+            logger.error("[coverage] Command not found: %s", cmd[0])
+            return f"[ERROR] Command not found: {cmd[0]}"
 
         output = (proc.stdout or "") + (proc.stderr or "")
 
@@ -133,7 +176,9 @@ class CoverageAnalyzer(BaseAnalyzer):
         """Parse raw coverage report output into a structured AnalyzerResult."""
         # Detect sentinel strings injected by run() on hard failures.
         # These mean the tool never ran — semantically ERROR, not FAILED.
-        if raw_output.startswith("[TIMEOUT]") or raw_output.startswith("[ERROR]"):
+        # Use `in` because with multi-step runs the sentinel may appear inside
+        # a section header rather than at position 0.
+        if "[TIMEOUT]" in raw_output or "[ERROR]" in raw_output:
             return AnalyzerResult(
                 analyzer=self.name,
                 language=self.language,
