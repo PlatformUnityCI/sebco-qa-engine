@@ -73,7 +73,36 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install consumer dependencies
-        run: ${{ inputs.install-command }}
+        shell: bash
+        run: |
+          set -e
+      
+          echo "🔧 Installing dependencies..."
+      
+          INSTALL_CMD="${{ inputs.install-command }}"
+      
+          # Trim espacios (clave)
+          INSTALL_CMD="$(echo "$INSTALL_CMD" | xargs)"
+      
+          if [ -n "$INSTALL_CMD" ]; then
+            echo "👉 Using custom install-command"
+            eval "$INSTALL_CMD"
+          else
+            echo "👉 Using default smart install strategy"
+      
+            if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+              echo "📦 Detected Python package"
+              pip install -e .[dev] --quiet || echo "⚠️ Editable install failed, falling back..."
+            fi
+      
+            if [ -f "requirements.txt" ]; then
+              echo "📄 Installing from requirements.txt"
+              pip install -r requirements.txt || true
+            fi
+      
+            echo "🧪 Ensuring analyzers are installed"
+            pip install flake8 coverage bandit radon mutmut
+          fi
 
       - name: Install QA engine
         run: |
