@@ -48,8 +48,10 @@ src/sebco_qa_engine/
 └── utils/
     └── text.py                 ← strip_ansi and other pure utilities
 ```
+> [!NOTE]
+> For technical details, architecture, and advanced usage, see the documentation in `docs/`.
 
-Artifact output per analyzer:
+## Artifact output per analyzer:
 
 ```
 qa-report/
@@ -140,8 +142,13 @@ jobs:
 | `python-version` | `"3.12"` | Python version to use |
 | `analyzers` | `"flake8,coverage,bandit,radon, mutmut"` | Comma-separated list of analyzers to run. Valid values: `flake8`, `coverage`, `bandit`, `radon`, `mutmut` |
 | `output-dir` | `"qa-report"` | Directory where QA artifacts are written |
+| `engine-ref` | `"main"` | Branch/tag of this engine to install |
 
-#### Required permissions in the calling repository
+> [!TIP]
+> `engine-ref` is optional and defaults to `main`.
+> You only need to set it when testing a feature branch of `sebco-qa-engine`.
+
+### Required permissions in the calling repository
 
 ```yaml
 permissions:
@@ -199,6 +206,30 @@ do_not_mutate = [
 | `bandit` | — | any HIGH finding or medium > 5 | Severity-weighted score: HIGH × 50 + MEDIUM × 10 + LOW × 1 penalty subtracted from 100. Gate is hard on HIGH, tolerant on LOW. |
 | `radon` | score < 70% | score < 50% | Score = mean Maintainability Index across all modules (0–100). Files ranked C–F count as `issue_count`. |
 
+---
+
+> [!NOTE]
+> Testing a feature branch of `sebco-qa-engine`.
+>
+> By default, `sebco-qa-engine` installs the engine package from `main`. This is the expected behavior for normal consumer usage.
+>
+> If you want to test a feature branch, the workflow reference and `engine-ref` must point to the same branch.
+>
+> If these references do not match, the workflow may run one branch while installing the engine package from another.
+>
+> Example:
+>
+> ```yaml
+> qa-engine:
+>   uses: PlatformUnityCI/sebco-qa-engine/.github/workflows/python-qa.yml@feature/my-branch
+>   with:
+>     python-version: "3.12"
+>     analyzers: "mutmut,flake8,coverage,bandit,radon"
+>     output-dir: "qa-report"
+>     engine-ref: "feature/my-branch"
+>   secrets:
+>     token: ${{ secrets.GITHUB_TOKEN }}
+> ```
 ---
 
 ## Roadmap
