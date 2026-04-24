@@ -87,9 +87,20 @@ class Flake8Analyzer(BaseAnalyzer):
         str
             Combined stdout + stderr from the flake8 process.
         """
+
+        # Filter only existing paths
+        existing_paths = [
+            p for p in self.config.paths
+            if Path(p).exists()
+        ]
+
+        # Fallback if none exist
+        if not existing_paths:
+            existing_paths = ["."]
+
         cmd = [
             "flake8",
-            *self.config.paths,
+            *existing_paths,
             "--format=default",
             *(
                 ["--max-line-length", str(self.config.max_line_length)]
@@ -102,7 +113,7 @@ class Flake8Analyzer(BaseAnalyzer):
         logger.debug("[flake8] Running: %s", " ".join(cmd))
 
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,
@@ -137,13 +148,15 @@ class Flake8Analyzer(BaseAnalyzer):
 
             m = _VIOLATION_RE.match(line)
             if m:
-                violations.append({
-                    "file": m.group(1),
-                    "line": int(m.group(2)),
-                    "col": int(m.group(3)),
-                    "code": m.group(4),
-                    "message": m.group(5),
-                })
+                violations.append(
+                    {
+                        "file": m.group(1),
+                        "line": int(m.group(2)),
+                        "col": int(m.group(3)),
+                        "code": m.group(4),
+                        "message": m.group(5),
+                    }
+                )
             else:
                 # Unexpected non-empty line that doesn't match the violation pattern
                 parse_error = True
@@ -167,18 +180,43 @@ class Flake8Analyzer(BaseAnalyzer):
         else:
             execution_status = ExecutionStatus.SUCCESS
 
-        budget = self.config.max_issue_budget
-        score_percent = max(0.0, round((1 - total / budget) * 100, 2))
+        fail_threshold = self.config.fail_threshold
+        warn_threshold = self.config.warn_threshold
+
+        if total > fail_threshold:
+            execution_status = ExecutionStatus.FAILED
+        elif total > warn_threshold:
+            execution_status = ExecutionStatus.WARNING
+
+        # budget = self.config.max_issue_budget
+        # score_percent = max(0.0, round((1 - total / budget) * 100, 2))
+
+        python_files = []
+
+        for p in self.config.paths:
+            python_files.extend(Path(p).rglob("*.py"))
+
+        dynamic_budget = max(
+            self.config.max_issue_budget,
+            len(python_files) * self.config.dynamic_budget_per_file,
+        )
+
+        budget = dynamic_budget
+
+        score_percent = max(
+            0.0,
+            round((1 - total / budget) * 100, 2),
+        )        
 
         metrics = RunMetrics(
             score=score_percent,
             total=total,
-            ok_count=0 if total > 0 else None,
+            ok_count = None if total > 0 else 1,
             issue_count=total,
             extra={
                 "violation_codes": unique_codes,
                 "score_percent": score_percent,
-                "max_issue_budget": budget,
+                "effective_budget": budget,
             },
         )
 
@@ -255,9 +293,7 @@ class Flake8Analyzer(BaseAnalyzer):
         m = result.metrics
         issue_str = str(m.issue_count) if m.issue_count is not None else "N/A"
         score_str = (
-            f"{m.extra['score_percent']}%"
-            if m.extra.get("score_percent") is not None
-            else "N/A"
+            f"{m.extra['score_percent']}%" if m.extra.get("score_percent") is not None else "N/A"
         )
         budget_str = str(m.extra.get("max_issue_budget", "N/A"))
         codes = m.extra.get("violation_codes", [])

@@ -35,7 +35,7 @@ on:
       engine-ref:
         description: "Branch/tag of sebco-qa-engine to use"
         type: string
-        default: "main"
+        default: "preuba-auto-analysis"
     secrets:
       token:
         description: "GitHub token for PR comments"
