@@ -188,13 +188,16 @@ class Flake8Analyzer(BaseAnalyzer):
         elif total > warn_threshold:
             execution_status = ExecutionStatus.WARNING
 
-        # budget = self.config.max_issue_budget
-        # score_percent = max(0.0, round((1 - total / budget) * 100, 2))
-
         python_files = []
 
         for p in self.config.paths:
-            python_files.extend(Path(p).rglob("*.py"))
+            path_obj = Path(p)
+            if path_obj.exists():
+                python_files.extend(path_obj.rglob("*.py"))
+
+        # Fallback if nothing found
+        if not python_files:
+            python_files = list(Path(".").rglob("*.py"))
 
         dynamic_budget = max(
             self.config.max_issue_budget,
