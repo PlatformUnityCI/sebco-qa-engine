@@ -87,9 +87,20 @@ class Flake8Analyzer(BaseAnalyzer):
         str
             Combined stdout + stderr from the flake8 process.
         """
+
+        # Filter only existing paths
+        existing_paths = [
+            p for p in self.config.paths
+            if Path(p).exists()
+        ]
+
+        # Fallback if none exist
+        if not existing_paths:
+            existing_paths = ["."]
+
         cmd = [
             "flake8",
-            *self.config.paths,
+            *existing_paths,
             "--format=default",
             *(
                 ["--max-line-length", str(self.config.max_line_length)]
@@ -99,7 +110,7 @@ class Flake8Analyzer(BaseAnalyzer):
             *self.config.extra_args,
         ]
 
-        logger.debug("[flake8] Running: %s", " ".join(cmd))
+        logger.info("[flake8] Running: %s", " ".join(cmd))
 
         try:
             proc = subprocess.run(  # noqa: S603
@@ -177,10 +188,16 @@ class Flake8Analyzer(BaseAnalyzer):
         elif total > warn_threshold:
             execution_status = ExecutionStatus.WARNING
 
-        # budget = self.config.max_issue_budget
-        # score_percent = max(0.0, round((1 - total / budget) * 100, 2))
+        python_files = []
 
-        python_files = list(Path().rglob("*.py"))
+        for p in self.config.paths:
+            path_obj = Path(p)
+            if path_obj.exists():
+                python_files.extend(path_obj.rglob("*.py"))
+
+        # Fallback if nothing found
+        if not python_files:
+            python_files = list(Path(".").rglob("*.py"))
 
         dynamic_budget = max(
             self.config.max_issue_budget,
