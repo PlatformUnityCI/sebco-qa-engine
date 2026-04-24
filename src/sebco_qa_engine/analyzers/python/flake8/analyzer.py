@@ -110,7 +110,7 @@ class Flake8Analyzer(BaseAnalyzer):
             *self.config.extra_args,
         ]
 
-        logger.debug("[flake8] Running: %s", " ".join(cmd))
+        logger.info("[flake8] Running: %s", " ".join(cmd))
 
         try:
             proc = subprocess.run(  # noqa: S603
